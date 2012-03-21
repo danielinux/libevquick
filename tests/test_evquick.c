@@ -44,7 +44,10 @@ void reader(int fd, short rev, void *arg)
 	if (e_stdin->counter > 10) {
 		printf("####### STDIN suspended for 2 seconds #######\n");
 		evquick_delevent(e_stdin->ev);
+		printf("Event deleted.\n");
 		evquick_addtimer(2000, 0, reader_enable, arg);
+		printf("Timer added.\n");
+
 	}
 }
 

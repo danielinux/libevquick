@@ -14,8 +14,9 @@
 #include <sys/time.h>
 #include "heap.h"
 #include "libevquick.h"
+#include <semaphore.h>
 
-static int giveup;
+static __thread int giveup;
 
 
 struct evquick_timer_instance
@@ -29,7 +30,7 @@ DECLARE_HEAP(evquick_timer_instance, expire);
 
 struct evquick_ctx
 {
-	int interrupt;
+	sem_t interrupt;
 	int changed;
 	int n_events;
 	int last_served;
@@ -39,7 +40,15 @@ struct evquick_ctx
 	heap_evquick_timer_instance *timers;
 };
 
-static struct evquick_ctx *ctx;
+static __thread struct evquick_ctx *ctx;
+
+void give_me_a_break(int signo)
+{
+	if (signo == SIGALRM)
+		sem_post(&ctx->interrupt);
+}
+
+#define LOOP_BREAK() give_me_a_break(SIGALRM)
 
 evquick_event *evquick_addevent(int fd, short events,
 	void (*callback)(int fd, short revents, void *arg),
@@ -60,6 +69,7 @@ evquick_event *evquick_addevent(int fd, short events,
 	e->next = ctx->events;
 	ctx->events = e;
 	ctx->n_events++;
+	LOOP_BREAK();
 	return e;
 }
 
@@ -81,6 +91,7 @@ void evquick_delevent(evquick_event *e)
 	}
 	ctx->n_events--;
 	ctx->changed = 1;
+	LOOP_BREAK();
 }
 
 static void timer_trigger(evquick_timer *t, unsigned long long now,
@@ -92,7 +103,12 @@ static void timer_trigger(evquick_timer *t, unsigned long long now,
 	heap_insert(ctx->timers, &tev);
 	first = heap_first(ctx->timers);
 	if (first) {
-		unsigned long long interval = (first->expire - now);
+		unsigned long long interval;
+		if (now >= first->expire) {
+			LOOP_BREAK();
+			return;
+		}
+		interval = first->expire - now;
 		if (interval >= 1000)
 			alarm(interval / 1000);
 		else
@@ -138,11 +154,6 @@ void evquick_deltimer(evquick_timer *t)
 
 
 
-void give_me_a_break(int signo)
-{
-	if (signo == SIGALRM)
-		ctx->interrupt = 1;
-}
 
 int evquick_init(void)
 {
@@ -153,6 +164,8 @@ int evquick_init(void)
 	if (!ctx->timers)
 		return -1;
 	signal(SIGALRM, give_me_a_break);
+
+	sem_init(&ctx->interrupt, 0, 0);
 	return 0;
 }
 
@@ -162,6 +175,7 @@ static void rebuild_poll(void)
 	evquick_event *e = ctx->events;
 	if (ctx->n_events == 0) {
 		ctx->pfd = NULL;
+		ctx->changed = 0;
 		return;
 	}
 	ctx->pfd = realloc(ctx->pfd, sizeof(struct pollfd) * ctx->n_events);
@@ -199,77 +213,95 @@ static void serve_event(int n)
 }
 
 
+void timer_check(void)
+{
+	evquick_timer_instance t, *first;
+	unsigned long long now = gettimeofdayms();
+	first = heap_first(ctx->timers);
+	while(first && (first->expire <= now)) {
+		heap_peek(ctx->timers, &t);
+		if (t.ev_timer->flags & EVQUICK_EV_DISABLED) {
+			/* Timer was disabled in the meanwhile.
+			 * Take no action, and destroy it.
+			 */
+			free(t.ev_timer);
+		} else if (t.ev_timer->flags & EVQUICK_EV_RETRIGGER) {
+			timer_trigger(t.ev_timer, now, now + t.ev_timer->interval);
+			t.ev_timer->callback(t.ev_timer->arg);
+			/* Don't free the timer, reuse for next instance
+			 * that has just been scheduled.
+			 */
+		} else {
+			/* One shot, invoke callback,
+			 * then destroy the timer. */
+			t.ev_timer->callback(t.ev_timer->arg);
+			free(t.ev_timer);
+		}
+		first = heap_first(ctx->timers);
+	}
+	if(first) {
+		unsigned long long interval = first->expire - now;
+		if (interval >= 1000)
+			alarm(interval / 1000);
+		else
+			ualarm((useconds_t) (1000 * (first->expire - now)), 0);
+	}
+}
+
 void evquick_loop(void)
 {
-	int pollret, i; 
-	evquick_timer_instance t, *first;
-	while(1) {
+	int pollret, i, wait_ret;
+	struct timespec ts = {0, 1000000};
+	for(;;) {
+		if (giveup)
+			break;
+
 		if (ctx->changed) {
 			rebuild_poll();
+			continue;
 		}
-		if (ctx->n_events == 0) {
-			sleep(3600);
-			goto timer_check;
+
+		if ((ctx->n_events == 0))
+			ts.tv_sec = 3600;
+		else
+			ts.tv_sec = 0;
+
+		wait_ret = sem_timedwait(&ctx->interrupt, &ts);
+		if (wait_ret == 0) {
+			timer_check();
+			continue;
 		}
+
+		if ((wait_ret == -1) && (errno == EINTR))
+			continue; /* Got signal, restart. */ 
+		printf("entering poll...\n");
+
 		pollret = poll(ctx->pfd, ctx->n_events, 3600 * 1000);
+		printf("end poll...\n");
 		if (pollret <= 0)
-			goto timer_check;
-
-
+			continue;
 
 		for (i = ctx->last_served +1; i < ctx->n_events; i++) {
 			if (ctx->pfd[i].revents != 0) {
 				serve_event(i);
-				goto timer_check;
+				continue;
 			}
 		}
 		for (i = 0; i <= ctx->last_served; i++) {
 			if (ctx->pfd[i].revents != 0) {
 				serve_event(i);
-				goto timer_check;
+				continue;
 			}
 		}
 
 	timer_check:
-		if (ctx->interrupt) {
-			unsigned long long now = gettimeofdayms();
-			ctx->interrupt = 0;
-			first = heap_first(ctx->timers);
-			while(first && (first->expire <= now)) {
-				heap_peek(ctx->timers, &t);
-				if (t.ev_timer->flags & EVQUICK_EV_DISABLED) {
-					/* Timer was disabled in the meanwhile.
-					 * Take no action, and destroy it.
-					 */
-					free(t.ev_timer);
-				} else if (t.ev_timer->flags & EVQUICK_EV_RETRIGGER) {
-					timer_trigger(t.ev_timer, now, now + t.ev_timer->interval);
-					t.ev_timer->callback(t.ev_timer->arg);
-					/* Don't free the timer, reuse for next instance
-					 * that has just been scheduled.
-					 */
-				} else {
-					/* One shot, invoke callback,
-					 * then destroy the timer. */
-					t.ev_timer->callback(t.ev_timer->arg);
-					free(t.ev_timer);
-				}
-				first = heap_first(ctx->timers);
-			}
-			if(first) {
-				unsigned long long interval = first->expire - now;
-				if (interval >= 1000)
-					alarm(interval / 1000);
-				else
-					ualarm((useconds_t) (1000 * (first->expire - now)), 0);
-			}
-		}
 		if (giveup)
 			break;
-	} /* while loop */
+	} /* main loop */
 }
 
 void evquick_fini(void)
 {
+	ualarm(1000, 0);
 	giveup = 1;
 }
