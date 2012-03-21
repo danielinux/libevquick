@@ -55,6 +55,7 @@ void evquick_deltimer(evquick_timer *t);
 
 void evquick_loop(void);
 int evquick_init(void);
+void evquick_fini(void);
 
 #endif
 

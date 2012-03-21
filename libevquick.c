@@ -15,6 +15,8 @@
 #include "heap.h"
 #include "libevquick.h"
 
+static int giveup;
+
 
 struct evquick_timer_instance
 {
@@ -262,5 +264,12 @@ void evquick_loop(void)
 					ualarm((useconds_t) (1000 * (first->expire - now)), 0);
 			}
 		}
+		if (giveup)
+			break;
 	} /* while loop */
+}
+
+void evquick_fini(void)
+{
+	giveup = 1;
 }
