@@ -14,7 +14,8 @@
 #include <sys/time.h>
 #include "heap.h"
 #include "libevquick.h"
-#include <semaphore.h>
+#include <fcntl.h>
+#include <assert.h>
 
 static __thread int giveup;
 
@@ -30,7 +31,7 @@ DECLARE_HEAP(evquick_timer_instance, expire);
 
 struct evquick_ctx
 {
-	sem_t interrupt;
+	int time_machine[2];
 	int changed;
 	int n_events;
 	int last_served;
@@ -44,8 +45,10 @@ static __thread struct evquick_ctx *ctx;
 
 void give_me_a_break(int signo)
 {
+	char c = 't';
 	if (signo == SIGALRM)
-		sem_post(&ctx->interrupt);
+		if (write(ctx->time_machine[1], &c, 1) < 0)
+			ualarm(1000, 0);
 }
 
 #define LOOP_BREAK() give_me_a_break(SIGALRM)
@@ -76,6 +79,7 @@ evquick_event *evquick_addevent(int fd, short events,
 void evquick_delevent(evquick_event *e)
 {
 	evquick_event *cur, *prev;
+	ctx->changed = 1;
 	cur = ctx->events;
 	prev = NULL;
 	while(cur) {
@@ -90,7 +94,6 @@ void evquick_delevent(evquick_event *e)
 		cur = cur->next;
 	}
 	ctx->n_events--;
-	ctx->changed = 1;
 	LOOP_BREAK();
 }
 
@@ -105,7 +108,7 @@ static void timer_trigger(evquick_timer *t, unsigned long long now,
 	if (first) {
 		unsigned long long interval;
 		if (now >= first->expire) {
-			LOOP_BREAK();
+			ualarm(1000, 0);
 			return;
 		}
 		interval = first->expire - now;
@@ -142,6 +145,8 @@ evquick_timer *evquick_addtimer(
 	t->callback = callback;
 	t->arg = arg;
 	timer_trigger(t, now, now + t->interval);
+	ctx->changed = 1;
+
 	return t;
 }
 
@@ -149,45 +154,58 @@ evquick_timer *evquick_addtimer(
 void evquick_deltimer(evquick_timer *t)
 {
 	t->flags |= EVQUICK_EV_DISABLED;
+	ctx->changed = 1;
 }
-
-
-
-
 
 int evquick_init(void)
 {
+	int yes = 1;
 	ctx = calloc(1, sizeof(struct evquick_ctx));
 	if (!ctx)
 		return -1;
 	ctx->timers = heap_init();
 	if (!ctx->timers)
 		return -1;
+	if(pipe(ctx->time_machine) < 0)
+		return -1;
+	fcntl(ctx->time_machine[1], O_NONBLOCK, &yes);
+	ctx->n_events = 1;
+	ctx->changed = 1;
 	signal(SIGALRM, give_me_a_break);
-
-	sem_init(&ctx->interrupt, 0, 0);
 	return 0;
 }
 
 static void rebuild_poll(void)
 {
-	int i = 0;
+	int i = 1;
 	evquick_event *e = ctx->events;
-	if (ctx->n_events == 0) {
+	void *ptr = NULL;
+
+	if (ctx->pfd) {
+		ptr = ctx->pfd;
 		ctx->pfd = NULL;
-		ctx->changed = 0;
-		return;
+		free(ptr);
 	}
-	ctx->pfd = realloc(ctx->pfd, sizeof(struct pollfd) * ctx->n_events);
-	ctx->_array = realloc(ctx->_array, sizeof(evquick_event) * ctx->n_events);
+	if (ctx->_array) {
+		ptr = ctx->_array;
+		ctx->_array = NULL;
+		free(ptr);
+	}
+	ctx->pfd = malloc(sizeof(struct pollfd) * ctx->n_events);
+	ctx->_array = malloc(sizeof(evquick_event) * ctx->n_events);
+
 	if ((!ctx->pfd) || (!ctx->_array)) {
 		/* TODO: notify error, events are disabled.
 		 * perhaps provide a context-wide callback for errors.
 		 */
-		ctx->n_events = 0;
+		perror("MEMORY");
+		ctx->n_events = 1;
 		ctx->changed = 0;
 		return;
 	}
+
+	ctx->pfd[0].fd = ctx->time_machine[0];
+	ctx->pfd[0].events = POLLIN;
 
 	while(e) {
 		memcpy(ctx->_array + i, e, sizeof(evquick_event));
@@ -195,13 +213,15 @@ static void rebuild_poll(void)
 		ctx->pfd[i++].events = (e->events & (POLLIN | POLLOUT)) | (POLLHUP | POLLERR);
 		e = e->next;
 	}
-	ctx->last_served = 0;
+	ctx->last_served = 1;
 	ctx->changed = 0;
 }
 
 static void serve_event(int n)
 {
 	evquick_event *e = ctx->_array + n;
+	if (n >= ctx->n_events)
+		return;
 	if (e) {
 		ctx->last_served = n;
 		if ((ctx->pfd[n].revents & (POLLHUP | POLLERR)) && e->err_callback)
@@ -220,6 +240,10 @@ void timer_check(void)
 	first = heap_first(ctx->timers);
 	while(first && (first->expire <= now)) {
 		heap_peek(ctx->timers, &t);
+		if (!t.ev_timer) {
+			first = heap_first(ctx->timers);
+			continue;
+		}
 		if (t.ev_timer->flags & EVQUICK_EV_DISABLED) {
 			/* Timer was disabled in the meanwhile.
 			 * Take no action, and destroy it.
@@ -250,8 +274,7 @@ void timer_check(void)
 
 void evquick_loop(void)
 {
-	int pollret, i, wait_ret;
-	struct timespec ts = {0, 1000000};
+	int pollret, i;
 	for(;;) {
 		if (giveup)
 			break;
@@ -261,24 +284,24 @@ void evquick_loop(void)
 			continue;
 		}
 
-		if ((ctx->n_events == 0))
-			ts.tv_sec = 3600;
-		else
-			ts.tv_sec = 0;
-
-		wait_ret = sem_timedwait(&ctx->interrupt, &ts);
-		if (wait_ret == 0) {
-			timer_check();
+		if (ctx->pfd == NULL) {
+			sleep(3600);
+			ctx->changed = 1;
 			continue;
 		}
 
-		if ((wait_ret == -1) && (errno == EINTR))
-			continue; /* Got signal, restart. */ 
-		printf("entering poll...\n");
 
 		pollret = poll(ctx->pfd, ctx->n_events, 3600 * 1000);
-		printf("end poll...\n");
 		if (pollret <= 0)
+			continue;
+
+		if ((ctx->pfd[0].revents & POLLIN) == POLLIN) {
+			char discard;
+			read(ctx->time_machine[0], &discard, 1);
+			timer_check();
+			continue;
+		}
+		if (ctx->n_events < 2)
 			continue;
 
 		for (i = ctx->last_served +1; i < ctx->n_events; i++) {
@@ -287,16 +310,12 @@ void evquick_loop(void)
 				continue;
 			}
 		}
-		for (i = 0; i <= ctx->last_served; i++) {
+		for (i = 1; i <= ctx->last_served; i++) {
 			if (ctx->pfd[i].revents != 0) {
 				serve_event(i);
 				continue;
 			}
 		}
-
-	timer_check:
-		if (giveup)
-			break;
 	} /* main loop */
 }
 

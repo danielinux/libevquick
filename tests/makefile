@@ -4,6 +4,6 @@ clean:
 test_heap:
 	gcc -o test_heap test_heap.c -I..
 test_evquick:
-	gcc -o test_evquick test_evquick.c ../libevquick.c  -I.. -g -ggdb -lrt
+	gcc -o test_evquick test_evquick.c ../libevquick.c  -I.. -g -ggdb
 test_timers:
-	gcc -o test_timers test_timers.c ../libevquick.c  -I.. -g -ggdb -lrt
+	gcc -o test_timers test_timers.c ../libevquick.c  -I.. -g -ggdb 

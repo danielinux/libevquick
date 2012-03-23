@@ -32,7 +32,7 @@ int main(void)
 	evquick_timer *retriggered[NUMTIMERS];
 	if(evquick_init() < 0)
 		exit(2);
-
+	printf("Registering timers...\n");
 	for (i = 0; i < NUMTIMERS; i++) {
 		if (i % 2)
 			register_timer1(timers[i], i*100, i);
