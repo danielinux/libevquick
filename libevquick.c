@@ -307,15 +307,18 @@ void evquick_loop(void)
 		for (i = ctx->last_served +1; i < ctx->n_events; i++) {
 			if (ctx->pfd[i].revents != 0) {
 				serve_event(i);
-				continue;
+				goto end_loop;
 			}
 		}
 		for (i = 1; i <= ctx->last_served; i++) {
 			if (ctx->pfd[i].revents != 0) {
 				serve_event(i);
-				continue;
+				goto end_loop;
 			}
 		}
+	end_loop:
+		continue;
+
 	} /* main loop */
 }
 
