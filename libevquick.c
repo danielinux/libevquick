@@ -171,7 +171,13 @@ int evquick_init(void)
 	fcntl(ctx->time_machine[1], O_NONBLOCK, &yes);
 	ctx->n_events = 1;
 	ctx->changed = 1;
-	signal(SIGALRM, give_me_a_break);
+	struct sigaction act;
+	memset(&act, 0, sizeof(act));
+	act.sa_handler = give_me_a_break;
+	if (sigaction(SIGALRM, &act, NULL) < 0) {
+		perror("Setting alarm signal");
+		return -1;
+	}
 	return 0;
 }
 
