@@ -44,7 +44,7 @@ static inline int heap_peek(struct heap_##type *heap, type *first) \
 { \
 	type *ptr = NULL; 		\
 	type *last;				\
-	int i, child;			\
+	unsigned i, child;			\
 	if(heap->n == 0) {		\
 		errno = ENOENT;		\
 		return -1; 			\
