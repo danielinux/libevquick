@@ -42,7 +42,6 @@ static inline int heap_insert(struct heap_##type *heap, type *el) \
 } \
 static inline int heap_peek(struct heap_##type *heap, type *first) \
 { \
-	type *ptr = NULL; 		\
 	type *last;				\
 	int i, child;			\
 	if(heap->n == 0) {		\
