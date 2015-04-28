@@ -26,8 +26,10 @@ static inline int heap_insert(struct heap_##type *heap, type *el) \
 	int i; \
     if (++heap->n >= heap->size) {													\
 		heap->top = realloc(heap->top, (heap->n + 1) * sizeof(type));				\
-		if (!heap->top)																\
+		if (!heap->top) {																\
+            heap->n--;                                                              \
 			return -1;																\
+        }                                                                           \
 		heap->size++;																\
 	}																				\
 	if (heap->n == 1) {															\
