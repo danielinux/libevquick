@@ -27,7 +27,7 @@ struct evquick_timer_instance
 };
 typedef struct evquick_timer_instance evquick_timer_instance;
 
-DECLARE_HEAP(evquick_timer_instance, expire);
+DECLARE_HEAP(evquick_timer_instance, expire)
 
 struct evquick_ctx
 {
