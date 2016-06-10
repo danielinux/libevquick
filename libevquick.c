@@ -12,6 +12,7 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <sys/time.h>
+#include <sys/types.h>
 #include "heap.h"
 #include "libevquick.h"
 #include <fcntl.h>
