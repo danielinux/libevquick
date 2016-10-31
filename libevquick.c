@@ -24,6 +24,7 @@ static __thread int giveup;
 struct evquick_timer_instance
 {
 	unsigned long long expire;
+	int id;
 	struct evquick_timer *ev_timer;
 };
 typedef struct evquick_timer_instance evquick_timer_instance;
@@ -104,7 +105,9 @@ static void timer_trigger(evquick_timer *t, unsigned long long now,
 	evquick_timer_instance tev, *first;
 	tev.ev_timer = t;
 	tev.expire = expire;
-	heap_insert(ctx->timers, &tev);
+	t->id = heap_insert(ctx->timers, &tev);
+	if (t->id < 0)
+		return;
 	first = heap_first(ctx->timers);
 	if (first) {
 		unsigned long long interval;
@@ -151,11 +154,9 @@ evquick_timer *evquick_addtimer(
 	return t;
 }
 
-
 void evquick_deltimer(evquick_timer *t)
 {
-	t->flags |= EVQUICK_EV_DISABLED;
-	ctx->changed = 1;
+	heap_delete(ctx->timers, t->id);
 }
 
 int evquick_init(void)

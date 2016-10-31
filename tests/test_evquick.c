@@ -3,6 +3,7 @@
 #include <unistd.h>
 #include "libevquick.h"
 #include <errno.h>
+#include <string.h>
 void enabler(void *arg);
 
 void recurrent(void *arg)

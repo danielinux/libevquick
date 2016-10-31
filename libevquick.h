@@ -32,6 +32,7 @@ typedef struct evquick_event evquick_event;
 struct evquick_timer
 {
 	unsigned long long interval;
+	int id;
 	short flags;
 	void (*callback)(void *arg);
 	void *arg;
