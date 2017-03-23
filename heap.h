@@ -26,7 +26,6 @@ struct heap_##type {                                                            
     struct heap_element_##type *top;                                                    \
 };                                                                                      \
 typedef struct heap_##type heap_##type;                                                 \
-static uint32_t _heap_idx_count = 0;                                                    \
 static inline int heap_insert(struct heap_##type *heap, type *el)                       \
 {                                                                                       \
     int i;                                                                              \
@@ -57,9 +56,8 @@ static inline int heap_insert(struct heap_##type *heap, type *el)               
 } \
 static inline int heap_peek(struct heap_##type *heap, type *first)                      \
 {                                                                                       \
-    type *ptr = NULL;                                                                   \
     struct heap_element_##type *last;                                                   \
-    int i, child, ret;                                                                  \
+    int i, child;                                                                  \
     if(heap->n == 0) {                                                                  \
         errno = ENOENT;                                                                 \
         return -1;                                                                      \
@@ -85,7 +83,7 @@ static inline int heap_peek(struct heap_##type *heap, type *first)              
 static inline int heap_delete(struct heap_##type *heap, int id)                         \
 {                                                                                       \
     int found = 0;                                                                      \
-    int i, child;                                                                       \
+    int i;                                                                       \
     struct heap_element_##type *last, temp;                                             \
     errno = 0;                                                                          \
     if (heap->n == 0) {                                                                 \
