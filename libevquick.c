@@ -18,7 +18,24 @@
 #include <fcntl.h>
 #include <assert.h>
 
-static __thread int giveup;
+
+
+struct evquick_ctx;
+#ifdef EVQUICK_PTHREAD
+#include <pthread.h>
+#   define THREAD_LOCAL __thread
+#else /* NO EVQUICK_PTHREAD defined */
+#   define THREAD_LOCAL
+#   define CTX_LIST (NULL)
+#   define ctx_add(c) do{}while(0)
+#   define ctx_del(c) do{}while(0)
+#   define ctx_signal_dispatch() do{}while(0)
+#endif
+
+static THREAD_LOCAL struct evquick_ctx *ctx;
+static THREAD_LOCAL int giveup;
+
+
 
 struct evquick_event
 {
@@ -59,21 +76,71 @@ struct evquick_ctx
     struct evquick_event *events;
     struct evquick_event *_array;
     heap_evquick_timer_instance *timers;
+#ifdef EVQUICK_PTHREAD
+    struct evquick_ctx *next;
+#endif
 };
 
-static __thread struct evquick_ctx *ctx;
+#ifdef EVQUICK_PTHREAD
+static pthread_mutex_t ctx_list_mutex = PTHREAD_MUTEX_INITIALIZER;
+static struct evquick_ctx *CTX_LIST = NULL;
 
-void give_me_a_break(int signo)
-{
-    char c = 't';
-    if (!ctx)
-        return;
-    if (signo == SIGALRM)
-        if (write(ctx->time_machine[1], &c, 1) < 0)
-            ualarm(1000, 0);
+static void ctx_add(struct evquick_ctx *c) {
+    pthread_mutex_lock(&ctx_list_mutex);
+    c->next = CTX_LIST;
+    CTX_LIST = c;
+    pthread_mutex_unlock(&ctx_list_mutex);
 }
 
-#define LOOP_BREAK() give_me_a_break(SIGALRM)
+static void ctx_del(struct evquick_ctx *delme) {
+    struct evquick_ctx *p = NULL, *c  = CTX_LIST; 
+    while(c) {
+        if (c == delme) {
+            pthread_mutex_lock(&ctx_list_mutex);
+            if (p)
+                p->next = c->next;
+            else
+                CTX_LIST = NULL;
+            pthread_mutex_unlock(&ctx_list_mutex);
+            return;
+        }
+        p = c;
+        c = c->next;
+    }
+}
+
+static void ctx_signal_dispatch(void)
+{
+    struct evquick_ctx *c = CTX_LIST;
+    while (c) {
+        if (c != ctx) {/* skip local context, the caller will write to its time
+                         machine 
+                         */
+            if (write(c->time_machine[1], &c, 1) < 0) {
+                ualarm(1000, 0);
+            }
+        }
+        c = c->next;
+    }
+}
+#endif
+
+
+void sig_alrm_handler(int signo)
+{
+    char c = 't';
+
+    if (signo == SIGALRM) {
+        ctx_signal_dispatch();
+        if (ctx) {
+            if (write(ctx->time_machine[1], &c, 1) < 0)
+                ualarm(1000, 0);
+        }
+    }
+}
+
+
+#define LOOP_BREAK() sig_alrm_handler(SIGALRM)
 
 evquick_event *evquick_addevent(int fd, short events,
     void (*callback)(int fd, short revents, void *arg),
@@ -106,7 +173,7 @@ void evquick_delevent(evquick_event *e)
 {
     evquick_event *cur, *prev;
     if (!ctx)
-        return NULL;
+        return ;
     ctx->changed = 1;
     cur = ctx->events;
     prev = NULL;
@@ -130,7 +197,7 @@ static void timer_trigger(evquick_timer *t, unsigned long long now,
 {
     evquick_timer_instance tev, *first;
     if (!ctx)
-        return NULL;
+        return ;
     tev.ev_timer = t;
     tev.expire = expire;
     t->id = heap_insert(ctx->timers, &tev);
@@ -192,6 +259,7 @@ void evquick_deltimer(evquick_timer *t)
 int evquick_init(void)
 {
     int yes = 1;
+    struct sigaction act;
     ctx = calloc(1, sizeof(struct evquick_ctx));
     if (!ctx)
         return -1;
@@ -203,13 +271,13 @@ int evquick_init(void)
     fcntl(ctx->time_machine[1], O_NONBLOCK, &yes);
     ctx->n_events = 1;
     ctx->changed = 1;
-    struct sigaction act;
     memset(&act, 0, sizeof(act));
-    act.sa_handler = give_me_a_break;
+    act.sa_handler = sig_alrm_handler;
     if (sigaction(SIGALRM, &act, NULL) < 0) {
         perror("Setting alarm signal");
         return -1;
     }
+    ctx_add(ctx);
     return 0;
 }
 
@@ -219,7 +287,7 @@ static void rebuild_poll(void)
     evquick_event *e;
     void *ptr = NULL;
     if (!ctx)
-        return NULL;
+        return ;
     e = ctx->events;
 
     if (ctx->pfd) {
@@ -262,7 +330,7 @@ static void serve_event(int n)
 {
     evquick_event *e = ctx->_array + n;
     if (!ctx)
-        return NULL;
+        return ;
     if (n >= ctx->n_events)
         return;
     if (e) {
@@ -281,7 +349,7 @@ void timer_check(void)
     evquick_timer_instance t, *first;
     unsigned long long now = gettimeofdayms();
     if (!ctx)
-        return NULL;
+        return ;
     first = heap_first(ctx->timers);
     while(first && (first->expire <= now)) {
         heap_peek(ctx->timers, &t);
@@ -358,10 +426,12 @@ void evquick_loop(void)
         continue;
 
     } /* main loop */
+    ctx_del(ctx);
+    ctx = NULL;
 }
 
 void evquick_fini(void)
 {
-    ualarm(1000, 0);
     giveup = 1;
+    ualarm(1000, 0);
 }
