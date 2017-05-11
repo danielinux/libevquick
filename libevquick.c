@@ -66,6 +66,8 @@ static __thread struct evquick_ctx *ctx;
 void give_me_a_break(int signo)
 {
     char c = 't';
+    if (!ctx)
+        return;
     if (signo == SIGALRM)
         if (write(ctx->time_machine[1], &c, 1) < 0)
             ualarm(1000, 0);
@@ -78,7 +80,11 @@ evquick_event *evquick_addevent(int fd, short events,
     void (*err_callback)(int fd, short revents, void *arg),
     void *arg)
 {
-    evquick_event *e = malloc(sizeof(evquick_event));
+    evquick_event *e;
+    if (!ctx)
+        return NULL;
+
+    e = malloc(sizeof(evquick_event));
     if (!e)
         return e;
     e->fd = fd;
@@ -99,6 +105,8 @@ evquick_event *evquick_addevent(int fd, short events,
 void evquick_delevent(evquick_event *e)
 {
     evquick_event *cur, *prev;
+    if (!ctx)
+        return NULL;
     ctx->changed = 1;
     cur = ctx->events;
     prev = NULL;
@@ -121,6 +129,8 @@ static void timer_trigger(evquick_timer *t, unsigned long long now,
     unsigned long long expire)
 {
     evquick_timer_instance tev, *first;
+    if (!ctx)
+        return NULL;
     tev.ev_timer = t;
     tev.expire = expire;
     t->id = heap_insert(ctx->timers, &tev);
@@ -158,6 +168,8 @@ evquick_timer *evquick_addtimer(
     void *arg)
 {
     unsigned long long now = gettimeofdayms();
+    if (!ctx)
+        return NULL;
 
     evquick_timer *t = malloc(sizeof(evquick_timer));
     if (!t)
@@ -204,8 +216,11 @@ int evquick_init(void)
 static void rebuild_poll(void)
 {
     int i = 1;
-    evquick_event *e = ctx->events;
+    evquick_event *e;
     void *ptr = NULL;
+    if (!ctx)
+        return NULL;
+    e = ctx->events;
 
     if (ctx->pfd) {
         ptr = ctx->pfd;
@@ -246,6 +261,8 @@ static void rebuild_poll(void)
 static void serve_event(int n)
 {
     evquick_event *e = ctx->_array + n;
+    if (!ctx)
+        return NULL;
     if (n >= ctx->n_events)
         return;
     if (e) {
@@ -263,6 +280,8 @@ void timer_check(void)
 {
     evquick_timer_instance t, *first;
     unsigned long long now = gettimeofdayms();
+    if (!ctx)
+        return NULL;
     first = heap_first(ctx->timers);
     while(first && (first->expire <= now)) {
         heap_peek(ctx->timers, &t);
@@ -296,7 +315,7 @@ void evquick_loop(void)
 {
     int pollret, i;
     for(;;) {
-        if (giveup)
+        if (!ctx || giveup)
             break;
 
         if (ctx->changed) {
