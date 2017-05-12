@@ -12,56 +12,58 @@
 static pthread_t T0, T1;
 static int tunnel[2];
 
+static __thread CTX ctx = NULL;
 
-void enabler0(void *arg);
-void disabler0(void *arg);
 
-void enabler1(void *arg);
-void disabler1(void *arg);
+void enabler0(CTX ctx, void *arg);
+void disabler0(CTX ctx, void *arg);
 
-void recurrent0(void *arg)
+void enabler1(CTX ctx, void *arg);
+void disabler1(CTX ctx, void *arg);
+
+void recurrent0(CTX ctx, void *arg)
 {
     assert(pthread_self() == T0);
     printf("Recurrent timer 0 elapsed!\n");
 }
 
-void recurrent1(void *arg)
+void recurrent1(CTX ctx, void *arg)
 {
     assert(pthread_self() == T1);
     printf("Recurrent timer 1 elapsed!\n");
 }
 
-void disabler0(void *arg)
+void disabler0(CTX ctx, void *arg)
 {
     evquick_timer *en, *rec = (evquick_timer *) arg;
     assert(pthread_self() == T0);
     printf("Disabler 0 timer elapsed!\n");
-    evquick_deltimer(rec);
-    en = evquick_addtimer(1000, 0, enabler0, NULL);
+    evquick_deltimer(ctx, rec);
+    en = evquick_addtimer(ctx, 1000, 0, enabler0, NULL);
 }
 
-void enabler0(void *arg)
+void enabler0(CTX ctx, void *arg)
 {
     assert(pthread_self() == T0);
-    evquick_timer *rec = evquick_addtimer(100, EVQUICK_EV_RETRIGGER, recurrent0, NULL);
-    evquick_timer *dis = evquick_addtimer(1000, 0, disabler0, rec);
+    evquick_timer *rec = evquick_addtimer(ctx, 100, EVQUICK_EV_RETRIGGER, recurrent0, NULL);
+    evquick_timer *dis = evquick_addtimer(ctx, 1000, 0, disabler0, rec);
     printf("Enabler timer elapsed!\n");
 }
 
-void disabler1(void *arg)
+void disabler1(CTX ctx, void *arg)
 {
     evquick_timer *en, *rec = (evquick_timer *) arg;
     assert(pthread_self() == T1);
     printf("Disabler 1 timer elapsed!\n");
-    evquick_deltimer(rec);
-    en = evquick_addtimer(1000, 0, enabler1, NULL);
+    evquick_deltimer(ctx, rec);
+    en = evquick_addtimer(ctx, 1000, 0, enabler1, NULL);
 }
 
-void enabler1(void *arg)
+void enabler1(CTX ctx, void *arg)
 {
     assert(pthread_self() == T1);
-    evquick_timer *rec = evquick_addtimer(100, EVQUICK_EV_RETRIGGER, recurrent1, NULL);
-    evquick_timer *dis = evquick_addtimer(1000, 0, disabler1, rec);
+    evquick_timer *rec = evquick_addtimer(ctx, 100, EVQUICK_EV_RETRIGGER, recurrent1, NULL);
+    evquick_timer *dis = evquick_addtimer(ctx, 1000, 0, disabler1, rec);
     printf("Enabler timer elapsed!\n");
 }
 
@@ -72,9 +74,9 @@ struct reader_obj {
     int counter;
 };
 
-void reader0_enable(void *arg);
-void reader1_enable(void *arg);
-void reader0(int fd, short rev, void *arg)
+void reader0_enable(CTX ctx, void *arg);
+void reader1_enable(CTX ctx, void *arg);
+void reader0(CTX ctx, int fd, short rev, void *arg)
 {
     char in;
     int r = read(fd, &in, 1);
@@ -89,15 +91,15 @@ void reader0(int fd, short rev, void *arg)
     }
     if (e_stdin->counter > 10) {
         printf("####### thread 0: STDIN suspended for 2 seconds #######\n");
-        evquick_delevent(e_stdin->ev);
+        evquick_delevent(ctx, e_stdin->ev);
         printf("Event deleted.\n");
-        evquick_addtimer(3000, 0, reader0_enable, arg);
+        evquick_addtimer(ctx, 3000, 0, reader0_enable, arg);
         printf("Timer added.\n");
 
     }
 }
 
-void reader1(int fd, short rev, void *arg)
+void reader1(CTX ctx, int fd, short rev, void *arg)
 {
     char in;
     int r = read(fd, &in, 1);
@@ -110,32 +112,32 @@ void reader1(int fd, short rev, void *arg)
         printf("Total char received so far (pipe): %d\n", ++(e_stdin->counter));
     if (e_stdin->counter > 10) {
         printf("####### thread 1: PIPE suspended for 4 seconds #######\n");
-        evquick_delevent(e_stdin->ev);
+        evquick_delevent(ctx,e_stdin->ev);
         printf("Event deleted.\n");
-        evquick_addtimer(4000, 0, reader1_enable, arg);
+        evquick_addtimer(ctx, 4000, 0, reader1_enable, arg);
         printf("Timer added.\n");
 
     }
 }
 
-void reader0_enable(void *arg)
+void reader0_enable(CTX ctx, void *arg)
 {
     struct reader_obj *e_stdin = (struct reader_obj *)arg;
     char buf[1024];
     assert(pthread_self() == T0);
     printf("Reader re-enabled, counter reset.\n");
     e_stdin->counter = 0;
-    e_stdin->ev = evquick_addevent(STDIN_FILENO, EVQUICK_EV_READ, reader0, NULL, arg);
+    e_stdin->ev = evquick_addevent(ctx, STDIN_FILENO, EVQUICK_EV_READ, reader0, NULL, arg);
 }
 
-void reader1_enable(void *arg)
+void reader1_enable(CTX ctx, void *arg)
 {
     struct reader_obj *e_stdin = (struct reader_obj *)arg;
     char buf[1024];
     assert(pthread_self() == T1);
     printf("Reader re-enabled, counter reset.\n");
     e_stdin->counter = 0;
-    e_stdin->ev = evquick_addevent(tunnel[0], EVQUICK_EV_READ, reader1, NULL, arg);
+    e_stdin->ev = evquick_addevent(ctx, tunnel[0], EVQUICK_EV_READ, reader1, NULL, arg);
 }
 
 void *t0_init(void *arg)
@@ -144,14 +146,14 @@ void *t0_init(void *arg)
     evquick_timer *t_recurrent;
     static __thread struct reader_obj e_stdin;
 
-    if(evquick_init() < 0)
+    if((ctx = evquick_init()) ==  NULL)
         exit(2);
 
-    t_recurrent = evquick_addtimer(100, EVQUICK_EV_RETRIGGER, recurrent0, NULL);
-    t_disabler = evquick_addtimer(1000, 0, disabler0, t_recurrent);
+    t_recurrent = evquick_addtimer(ctx, 100, EVQUICK_EV_RETRIGGER, recurrent0, NULL);
+    t_disabler = evquick_addtimer(ctx, 1000, 0, disabler0, t_recurrent);
     e_stdin.counter = 0;
-    e_stdin.ev = evquick_addevent(STDIN_FILENO, EVQUICK_EV_READ, reader0, NULL, &e_stdin);
-    evquick_loop();
+    e_stdin.ev = evquick_addevent(ctx, STDIN_FILENO, EVQUICK_EV_READ, reader0, NULL, &e_stdin);
+    evquick_loop(ctx);
 }
 
 void *t1_init(void *arg)
@@ -160,14 +162,14 @@ void *t1_init(void *arg)
     evquick_timer *t_recurrent;
     static __thread struct reader_obj e_tun;
 
-    if(evquick_init() < 0)
+    if((ctx = evquick_init()) ==  NULL)
         exit(2);
 
-    t_recurrent = evquick_addtimer(100, EVQUICK_EV_RETRIGGER, recurrent1, NULL);
-    t_disabler = evquick_addtimer(1000, 0, disabler1, t_recurrent);
+    t_recurrent = evquick_addtimer(ctx, 100, EVQUICK_EV_RETRIGGER, recurrent1, NULL);
+    t_disabler = evquick_addtimer(ctx, 1000, 0, disabler1, t_recurrent);
     e_tun.counter = 0;
-    e_tun.ev = evquick_addevent(tunnel[0], EVQUICK_EV_READ, reader1, NULL, &e_tun);
-    evquick_loop();
+    e_tun.ev = evquick_addevent(ctx, tunnel[0], EVQUICK_EV_READ, reader1, NULL, &e_tun);
+    evquick_loop(ctx);
 }
 
 

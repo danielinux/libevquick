@@ -23,26 +23,26 @@
 struct evquick_ctx;
 #ifdef EVQUICK_PTHREAD
 #include <pthread.h>
-#   define THREAD_LOCAL __thread
 #else /* NO EVQUICK_PTHREAD defined */
-#   define THREAD_LOCAL
+static struct evquick_ctx *ctx;
 #   define CTX_LIST (NULL)
 #   define ctx_add(c) do{}while(0)
 #   define ctx_del(c) do{}while(0)
 #   define ctx_signal_dispatch() do{}while(0)
 #endif
 
-static THREAD_LOCAL struct evquick_ctx *ctx;
-static THREAD_LOCAL int giveup;
-
-
 
 struct evquick_event
 {
     int fd;
     short events;
+#ifdef EVQUICK_PTHREAD
+    void (*callback)(CTX ctx, int fd, short revents, void *arg);
+    void (*err_callback)(CTX ctx, int fd, short revents, void *arg);
+#else
     void (*callback)(int fd, short revents, void *arg);
     void (*err_callback)(int fd, short revents, void *arg);
+#endif
     void *arg;
     struct evquick_event *next;
 };
@@ -52,7 +52,11 @@ struct evquick_timer
     unsigned long long interval;
     int id;
     short flags;
+#ifdef EVQUICK_PTHREAD
+    void (*callback)(CTX ctx, void *arg);
+#else
     void (*callback)(void *arg);
+#endif
     void *arg;
 };
 
@@ -76,6 +80,7 @@ struct evquick_ctx
     struct evquick_event *events;
     struct evquick_event *_array;
     heap_evquick_timer_instance *timers;
+    int giveup;
 #ifdef EVQUICK_PTHREAD
     struct evquick_ctx *next;
 #endif
@@ -113,12 +118,8 @@ static void ctx_signal_dispatch(void)
 {
     struct evquick_ctx *c = CTX_LIST;
     while (c) {
-        if (c != ctx) {/* skip local context, the caller will write to its time
-                         machine 
-                         */
-            if (write(c->time_machine[1], &c, 1) < 0) {
-                ualarm(1000, 0);
-            }
+        if (write(c->time_machine[1], &c, 1) < 0) {
+            ualarm(1000, 0);
         }
         c = c->next;
     }
@@ -126,26 +127,36 @@ static void ctx_signal_dispatch(void)
 #endif
 
 
-void sig_alrm_handler(int signo)
+static void sig_alrm_handler(int signo)
 {
     char c = 't';
 
     if (signo == SIGALRM) {
         ctx_signal_dispatch();
+#ifndef EVQUICK_PTHREAD
         if (ctx) {
             if (write(ctx->time_machine[1], &c, 1) < 0)
                 ualarm(1000, 0);
         }
+#endif
     }
 }
 
 
 #define LOOP_BREAK() sig_alrm_handler(SIGALRM)
 
+
+#ifdef EVQUICK_PTHREAD
+evquick_event *evquick_addevent(CTX ctx, int fd, short events,
+    void (*callback)(CTX ctx, int fd, short revents, void *arg),
+    void (*err_callback)(CTX ctx, int fd, short revents, void *arg),
+    void *arg)
+#else
 evquick_event *evquick_addevent(int fd, short events,
     void (*callback)(int fd, short revents, void *arg),
     void (*err_callback)(int fd, short revents, void *arg),
     void *arg)
+#endif
 {
     evquick_event *e;
     if (!ctx)
@@ -169,7 +180,11 @@ evquick_event *evquick_addevent(int fd, short events,
     return e;
 }
 
+#ifdef EVQUICK_PTHREAD
+void evquick_delevent(CTX ctx, evquick_event *e)
+#else
 void evquick_delevent(evquick_event *e)
+#endif
 {
     evquick_event *cur, *prev;
     if (!ctx)
@@ -192,7 +207,7 @@ void evquick_delevent(evquick_event *e)
     LOOP_BREAK();
 }
 
-static void timer_trigger(evquick_timer *t, unsigned long long now,
+static void timer_trigger(CTX ctx, evquick_timer *t, unsigned long long now,
     unsigned long long expire)
 {
     evquick_timer_instance tev, *first;
@@ -228,60 +243,7 @@ static unsigned long long gettimeofdayms(void)
     return ret;
 }
 
-
-evquick_timer *evquick_addtimer(
-    unsigned long long interval, short flags,
-    void (*callback)(void *arg),
-    void *arg)
-{
-    unsigned long long now = gettimeofdayms();
-    if (!ctx)
-        return NULL;
-
-    evquick_timer *t = malloc(sizeof(evquick_timer));
-    if (!t)
-        return t;
-    t->interval = interval;
-    t->flags = flags;
-    t->callback = callback;
-    t->arg = arg;
-    timer_trigger(t, now, now + t->interval);
-    ctx->changed = 1;
-
-    return t;
-}
-
-void evquick_deltimer(evquick_timer *t)
-{
-    heap_delete(ctx->timers, t->id);
-}
-
-int evquick_init(void)
-{
-    int yes = 1;
-    struct sigaction act;
-    ctx = calloc(1, sizeof(struct evquick_ctx));
-    if (!ctx)
-        return -1;
-    ctx->timers = heap_init();
-    if (!ctx->timers)
-        return -1;
-    if(pipe(ctx->time_machine) < 0)
-        return -1;
-    fcntl(ctx->time_machine[1], O_NONBLOCK, &yes);
-    ctx->n_events = 1;
-    ctx->changed = 1;
-    memset(&act, 0, sizeof(act));
-    act.sa_handler = sig_alrm_handler;
-    if (sigaction(SIGALRM, &act, NULL) < 0) {
-        perror("Setting alarm signal");
-        return -1;
-    }
-    ctx_add(ctx);
-    return 0;
-}
-
-static void rebuild_poll(void)
+static void rebuild_poll(CTX ctx)
 {
     int i = 1;
     evquick_event *e;
@@ -326,7 +288,8 @@ static void rebuild_poll(void)
     ctx->changed = 0;
 }
 
-static void serve_event(int n)
+
+static void serve_event(CTX ctx, int n)
 {
     evquick_event *e = ctx->_array + n;
     if (!ctx)
@@ -336,15 +299,93 @@ static void serve_event(int n)
     if (e) {
         ctx->last_served = n;
         if ((ctx->pfd[n].revents & (POLLHUP | POLLERR)) && e->err_callback)
+#ifdef EVQUICK_PTHREAD
+            e->err_callback(ctx, e->fd, ctx->pfd[n].revents, e->arg);
+#else
             e->err_callback(e->fd, ctx->pfd[n].revents, e->arg);
+#endif
         else {
+#ifdef EVQUICK_PTHREAD
+            e->callback(ctx, e->fd, ctx->pfd[n].revents, e->arg);
+#else
             e->callback(e->fd, ctx->pfd[n].revents, e->arg);
+#endif
         }
     }
 }
 
 
-void timer_check(void)
+/*** PUBLIC API ***/
+#ifdef EVQUICK_PTHREAD
+evquick_timer *evquick_addtimer(CTX ctx,
+    unsigned long long interval, short flags,
+    void (*callback)(CTX ctx, void *arg),
+    void *arg)
+#else
+evquick_timer *evquick_addtimer(
+    unsigned long long interval, short flags,
+    void (*callback)(void *arg),
+    void *arg)
+#endif
+{
+    unsigned long long now = gettimeofdayms();
+    if (!ctx)
+        return NULL;
+
+    evquick_timer *t = malloc(sizeof(evquick_timer));
+    if (!t)
+        return t;
+    t->interval = interval;
+    t->flags = flags;
+    t->callback = callback;
+    t->arg = arg;
+    timer_trigger(ctx, t, now, now + t->interval);
+    ctx->changed = 1;
+
+    return t;
+}
+
+#ifdef EVQUICK_PTHREAD
+void evquick_deltimer(CTX ctx, evquick_timer *t)
+#else
+void evquick_deltimer(evquick_timer *t)
+#endif
+{
+    heap_delete(ctx->timers, t->id);
+}
+
+CTX evquick_init(void)
+{
+    int yes = 1;
+    struct sigaction act;
+#ifdef EVQUICK_PTHREAD
+    CTX ctx;
+#endif
+    ctx = calloc(1, sizeof(struct evquick_ctx));
+    if (!ctx)
+        return NULL;
+    ctx->giveup = 0;
+    ctx->timers = heap_init();
+    if (!ctx->timers)
+        return NULL;
+    if(pipe(ctx->time_machine) < 0)
+        return NULL;
+    fcntl(ctx->time_machine[1], O_NONBLOCK, &yes);
+    ctx->n_events = 1;
+    ctx->changed = 1;
+    memset(&act, 0, sizeof(act));
+    act.sa_handler = sig_alrm_handler;
+    if (sigaction(SIGALRM, &act, NULL) < 0) {
+        perror("Setting alarm signal");
+        return NULL;
+    }
+    ctx_add(ctx);
+    return ctx;
+}
+
+
+
+static void timer_check(CTX ctx)
 {
     evquick_timer_instance t, *first;
     unsigned long long now = gettimeofdayms();
@@ -357,15 +398,23 @@ void timer_check(void)
             first = heap_first(ctx->timers);
             continue;
         } else if (t.ev_timer->flags & EVQUICK_EV_RETRIGGER) {
-            timer_trigger(t.ev_timer, now, now + t.ev_timer->interval);
+            timer_trigger(ctx, t.ev_timer, now, now + t.ev_timer->interval);
+#ifdef EVQUICK_PTHREAD
+            t.ev_timer->callback(ctx, t.ev_timer->arg);
+#else
             t.ev_timer->callback(t.ev_timer->arg);
+#endif
             /* Don't free the timer, reuse for next instance
              * that has just been scheduled.
              */
         } else {
             /* One shot, invoke callback,
              * then destroy the timer. */
+#ifdef EVQUICK_PTHREAD
+            t.ev_timer->callback(ctx, t.ev_timer->arg);
+#else
             t.ev_timer->callback(t.ev_timer->arg);
+#endif
             free(t.ev_timer);
         }
         first = heap_first(ctx->timers);
@@ -379,15 +428,19 @@ void timer_check(void)
     }
 }
 
+#ifdef EVQUICK_PTHREAD
+void evquick_loop(CTX ctx)
+#else
 void evquick_loop(void)
+#endif
 {
     int pollret, i;
     for(;;) {
-        if (!ctx || giveup)
+        if (!ctx || ctx->giveup)
             break;
 
         if (ctx->changed) {
-            rebuild_poll();
+            rebuild_poll(ctx);
             continue;
         }
 
@@ -404,7 +457,7 @@ void evquick_loop(void)
         if ((ctx->pfd[0].revents & POLLIN) == POLLIN) {
             char discard;
             read(ctx->time_machine[0], &discard, 1);
-            timer_check();
+            timer_check(ctx);
             continue;
         }
         if (ctx->n_events < 2)
@@ -412,13 +465,13 @@ void evquick_loop(void)
 
         for (i = ctx->last_served +1; i < ctx->n_events; i++) {
             if (ctx->pfd[i].revents != 0) {
-                serve_event(i);
+                serve_event(ctx, i);
                 goto end_loop;
             }
         }
         for (i = 1; i <= ctx->last_served; i++) {
             if (ctx->pfd[i].revents != 0) {
-                serve_event(i);
+                serve_event(ctx, i);
                 goto end_loop;
             }
         }
@@ -430,8 +483,12 @@ void evquick_loop(void)
     ctx = NULL;
 }
 
+#ifdef EVQUICK_PTHREAD
+void evquick_fini(CTX ctx)
+#else
 void evquick_fini(void)
+#endif
 {
-    giveup = 1;
+    ctx->giveup = 1;
     ualarm(1000, 0);
 }

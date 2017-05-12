@@ -18,15 +18,35 @@ struct evquick_event;
 struct evquick_timer;
 typedef struct evquick_event evquick_event;
 typedef struct evquick_timer evquick_timer;
+typedef struct evquick_ctx * CTX;
 
+#ifdef EVQUICK_PTHREAD
+CTX evquick_init(void);
+void evquick_loop(CTX ctx);
+void evquick_fini(CTX ctx);
+evquick_event *evquick_addevent(CTX ctx, int fd, short events,
+                                void (*callback)
+                                    (CTX ctx, int fd, short revents, void *arg),
+                                void (*err_callback)
+                                    (CTX ctx, int fd, short revents, void *arg),
+                                void *arg);
+
+void evquick_delevent(CTX ctx, evquick_event *e);
+evquick_timer *evquick_addtimer(CTX ctx, unsigned long long interval, short flags,
+                                void (*callback)(CTX ctx, void *arg),
+                                void *arg);
+
+void evquick_deltimer(CTX ctx, evquick_timer *t);
+
+#else 
 /* Initialize evquick loop
  * =========
  * To be called before any other function.
  *
- * Returns: 0 upon success, -1 otherwise.
+ * Returns: the Context CTX upon success, NULL otherwise.
  *          'errno' is set accordingly
  */
-int evquick_init(void);
+CTX evquick_init(void);
 
 /* Main loop
  * =========
@@ -98,7 +118,8 @@ evquick_timer *evquick_addtimer(unsigned long long interval, short flags,
 void evquick_deltimer(evquick_timer *t);
 
 
+#endif /* No pthreads. */
+
+
 #endif
-
-
 
